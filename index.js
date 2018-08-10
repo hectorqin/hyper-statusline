@@ -3,6 +3,8 @@ const { exec } = require('child_process');
 const color = require('color');
 const afterAll = require('after-all-results');
 const tildify = require('tildify');
+const path = require('path');
+const notify = require('hyper/notify');
 
 exports.decorateConfig = (config) => {
     const colorForeground = color(config.foregroundColor || '#fff');
@@ -147,6 +149,52 @@ let git = {
     remote: '',
     dirty: 0,
     ahead: 0
+}
+let _app;
+let matchSSH=(data)=>{return false;}
+let SSHConnect={}
+let aliasSendCommand="fs"
+let aliasReceiveCommand="js"
+let sendCommand="scp_send"
+let receiveCommand="scp_receive"
+let sshConnectTime=1000
+let injectCommand = true
+let injectFuncName = "scp_inject_func"
+
+// @flow
+
+const WRITE_TO_TERMINAL = 'statusline/executecommand';
+const writeToTerminal = (command, uid) => window.rpc.emit(WRITE_TO_TERMINAL, { command, uid });
+const executeCommand = (command, uid, currentInput = '') =>
+  writeToTerminal(`${'\b'.repeat(currentInput.length)}${command}\r`, uid);
+
+exports.onWindow = (win) => {
+    win.rpc.on(WRITE_TO_TERMINAL, ({ uid, command }) => {
+        win.sessions.get(uid).write(command);
+    });
+};
+
+exports.onApp = (app) => {
+    _app = app;
+    refreshConfig()
+};
+
+const refreshConfig = (config) =>{
+    if(_app){
+        config = _app.config.getConfig()
+    }
+    if(!config || !config.statusline) return
+    console.log(config.statusline)
+    if(config.statusline.matchSSH && typeof(config.statusline.matchSSH) == 'function'){
+        matchSSH = config.statusline.matchSSH
+    }
+    aliasSendCommand=config.statusline.aliasSendCommand || "fs"
+    aliasReceiveCommand=config.statusline.aliasReceiveCommand || "js"
+    sendCommand=config.statusline.sendCommand || "scp_send"
+    receiveCommand=config.statusline.receiveCommand || "scp_receive"
+    sshConnectTime=config.statusline.sshConnectTime || 1000
+
+    console.log(matchSSH)
 }
 
 const setCwd = (pid, action) => {
@@ -328,7 +376,7 @@ exports.decorateHyper = (Hyper, { React }) => {
 
 exports.middleware = (store) => (next) => (action) => {
     const uids = store.getState().sessions.sessions;
-
+    console.log(action)
     switch (action.type) {
         case 'SESSION_SET_XTERM_TITLE':
             pid = uids[action.uid].pid;
@@ -336,6 +384,7 @@ exports.middleware = (store) => (next) => (action) => {
 
         case 'SESSION_ADD':
             pid = action.pid;
+            delete SSHConnect[action.uid]
             setCwd(pid);
             break;
 
@@ -347,12 +396,190 @@ exports.middleware = (store) => (next) => (action) => {
                 setCwd(pid, action);
             }
             break;
-
-        case 'SESSION_SET_ACTIVE':
+            case 'SESSION_SET_ACTIVE':
             pid = uids[action.uid].pid;
             setCwd(pid);
+            break;
+        case 'SESSION_PTY_DATA':
+            if(!SSHConnect[action.uid]){
+                let result = matchSSH(action.data, console.log)
+                if(result){
+                    setTimeout(() => {
+                        exec(`ssh -p ${result[2]} ${result[0]}@${result[1]} "echo \\$HOSTNAME"`, (err, stdout) => {
+                            console.log("error", err);
+                            console.log("stdout", stdout);
+                            if(err){
+                                // ssh can not reuse
+                                notify("SSH can not reuse")
+                            } else {
+                                SSHConnect[action.uid] = {
+                                    "host": result[1],
+                                    "port": result[2],
+                                    "user": result[0]
+                                }
+                                if(injectCommand){
+                                    injectCommandToServer(action.uid)
+                                }
+
+                            }
+                        });
+                    }, sshConnectTime);
+                }
+            } else {
+                // match sendComman receiveCommand
+                let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
+                let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
+                sendResult = sendRegex.exec(action.data)
+                console.log("sendResult", sendResult)
+                if(sendResult){
+                    handleSend(action.uid, sendResult[1])
+                }
+                receiveResult = receiveRegex.exec(action.data)
+                console.log("receiveResult", receiveResult)
+                if(receiveResult){
+                    handleReceive(action.uid, receiveResult[1])
+                }
+            }
+            break;
+        case 'CONFIG_LOAD':
+        case 'CONFIG_RELOAD':
+            refreshConfig(action.config)
             break;
     }
 
     next(action);
 };
+
+const injectCommandToServer = (termID) => {
+    let helpCMD = `printf '\\nUsage:\\n${aliasSendCommand} [localhost:]file1 ... [-d [remoteserver:]path]\\n${aliasReceiveCommand} [remoteserver:]file1 ... [-d [localhost:]path]\\n\\nOptions:\\n-d  The destination in localhost or remoteserver.It can be absolute path or relative to your pwd.\\n\\nExample:\\n${aliasSendCommand} testfile.txt   This will send the file in your localhost pwd to the remoteserver.\\n\\nInject success! Enjoy yourself!\\n\\n'`
+    executeCommand(`${injectFuncName}(){ local s="";for i in $@; do s="$s '$i'"; done;s="$s '-w' '$(pwd)'";echo $s; } && alias ${aliasSendCommand}="${injectFuncName} ${sendCommand}" && alias ${aliasReceiveCommand}="${injectFuncName} ${receiveCommand}" && ${helpCMD}`, termID)
+}
+
+const parseArgs = (arg) =>{
+    let args = arg.trim().split("' '")
+    let maxIndex = args.length - 1
+    args.forEach((value, index, arr)=>{
+        if(index==0){
+            arr[index] = value + "'"
+        }else if(index==maxIndex){
+            arr[index] = "'" + value
+        }else{
+            arr[index] = "'" + value + "'"
+        }
+    })
+    return args
+}
+
+const handleSend = (termID, arg) => {
+    let args = parseArgs(arg)
+    console.log(args)
+    let source = []
+    let destination = ''
+    let serverPWD = ''
+    args.forEach((value, index, arr) => {
+        if(index && arr[index-1] == "'-d'"){
+            destination = value
+        }else if(index && arr[index-1] == "'-w'"){
+            serverPWD = value
+        }else if(value != "'-d'" && value != "'-w'"){
+            source.push(value)
+        }
+    });
+    console.log(source, destination, serverPWD)
+    source.forEach((value, index, arr) => {
+        if (value[0] != "/"){
+            arr[index] = path.join(cwd, value)
+        }
+    })
+    if(destination==""){
+        destination = serverPWD
+    } else if (destination[0] != "/"){
+        destination = path.join(serverPWD, destination)
+    }
+    console.log("source  ", source)
+    console.log("destination  ", destination)
+    let server = SSHConnect[termID]
+    execSSH(server, `mkdir -p ${destination}`, (err, stdout, stderr)=>{
+        if(err){
+            notify("Create destination false", stdout)
+            return;
+        }
+        execCMD(`scp -r -P ${server.port} ${source.join(' ')} ${server.user}@${server.host}:${destination}`, (err, stdout) => {
+            if(err){
+                notify("Send file false", stdout)
+                return;
+            }else{
+                notify("Send success")
+            }
+        });
+    })
+}
+
+const handleReceive = (termID, arg) => {
+    let args = parseArgs(arg)
+    console.log(args)
+    let source = []
+    let destination = ''
+    let serverPWD = ''
+    args.forEach((value, index, arr) => {
+        if(index && arr[index-1] == "'-d'"){
+            destination = value
+        }else if(index && arr[index-1] == "'-w'"){
+            serverPWD = value
+        }else if(value != "'-d'" && value != "'-w'"){
+            source.push(value)
+        }
+    });
+    console.log(source, destination, serverPWD)
+    source.forEach((value, index, arr) => {
+        if (value[0] != "/"){
+            arr[index] = path.join(serverPWD, value)
+        }
+    })
+    if(destination==""){
+        destination = cwd
+    } else if (destination[0] != "/"){
+        destination = path.join(cwd, destination)
+    }
+    console.log("source  ", source)
+    console.log("destination  ", destination)
+    let server = SSHConnect[termID]
+    execCMD(`mkdir -p ${destination}`, (err, stdout, stderr)=>{
+        if(err){
+            notify("Create destination false", stdout)
+            return;
+        }
+        execCMD(`scp -r -P ${server.port} ${server.user}@${server.host}:"${source.join(' ')}" ${destination}`, (err, stdout) => {
+            if(err){
+                notify("Receive file false", stdout)
+                return;
+            }else{
+                notify("Receive success")
+            }
+        });
+    })
+}
+
+if (!Array.isArray) {
+    Array.isArray = function(arg) {
+        return Object.prototype.toString.call(arg) === '[object Array]';
+    };
+}
+
+const execSSH = (server, cmd, handle) => {
+    cmd = Array.isArray(cmd) ? cmd : [cmd]
+    let command = cmd.join(" && ")
+    execCMD(`ssh -p ${server.port} ${server.user}@${server.host} "${command}"`, (err, stdout, stderr) => {
+        handle && handle(err, stdout, stderr)
+    });
+}
+
+const execCMD = (command, handle) => {
+    console.log(command)
+    exec(command, (err, stdout, stderr) => {
+        console.log("error", err);
+        console.log("stdout", stdout);
+        console.log("stderr", stderr);
+        handle && handle(err, stdout, stderr)
+    });
+}
