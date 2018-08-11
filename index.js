@@ -4,7 +4,26 @@ const color = require('color');
 const afterAll = require('after-all-results');
 const tildify = require('tildify');
 const path = require('path');
-const notify = require('hyper/notify');
+
+let notify;
+try {
+    notify = require('hyper/notify');
+} catch (error) {
+    notify = function(title, body, details = {}) {
+        console.log(`[Notification] ${title}: ${body}`);
+        if (details.error) {
+            console.error(details.error);
+        }
+        console.log(_win)
+        if (_win) {
+            _win.webContents.send('notification', {
+                title,
+                body
+            });
+        }
+    }
+}
+// const notify = require('hyper/notify');
 
 exports.decorateConfig = (config) => {
     const colorForeground = color(config.foregroundColor || '#fff');
@@ -151,7 +170,9 @@ let git = {
     ahead: 0
 }
 let _app;
-let matchSSH=(data)=>{return false;}
+let _win;
+let matchSSHConnect=(data)=>{return false;}
+let matchSSHDisconnect=(data)=>{return data.match("Connection to [^ ]+ closed");}
 let SSHConnect={}
 let aliasSendCommand="fs"
 let aliasReceiveCommand="js"
@@ -160,6 +181,7 @@ let receiveCommand="scp_receive"
 let sshConnectTime=1000
 let injectCommand = true
 let injectFuncName = "scp_inject_func"
+let defaultInteraction = false
 
 // @flow
 
@@ -172,6 +194,40 @@ exports.onWindow = (win) => {
     win.rpc.on(WRITE_TO_TERMINAL, ({ uid, command }) => {
         win.sessions.get(uid).write(command);
     });
+    win.rpc.on("scp-send-select-file", ({options, args}) =>{
+        console.log(options)
+        console.log(args)
+        const dialog = require('electron').dialog
+        // const notify = require('hyper/notify');
+        dialog.showOpenDialog(options, function (files) {
+            console.log(files)
+            if(!files || !files.length){
+                notify("User canceled")
+                return
+            }
+            let source = []
+            files.forEach((value, index) => {
+                source.push("'" + value + "'")
+            });
+            scpToServer(args.server, source, args.destination)
+        })
+    })
+    win.rpc.on("scp-receive-select-path", ({options, args}) =>{
+        console.log(options)
+        console.log(args)
+        const dialog = require('electron').dialog
+        // const notify = require('hyper/notify');
+        dialog.showOpenDialog(options, function (files) {
+            console.log(files)
+            if(!files || !files.length){
+                notify("User canceled")
+                return
+            }
+            scpToLocal(args.server, args.source, files[0])
+        })
+    })
+    _win = win
+    console.log(_win)
 };
 
 exports.onApp = (app) => {
@@ -183,18 +239,24 @@ const refreshConfig = (config) =>{
     if(_app){
         config = _app.config.getConfig()
     }
-    if(!config || !config.statusline) return
-    console.log(config.statusline)
-    if(config.statusline.matchSSH && typeof(config.statusline.matchSSH) == 'function'){
-        matchSSH = config.statusline.matchSSH
+    if(!config || !config.hyperStatusLine) return
+    console.log(config.hyperStatusLine)
+    if(config.hyperStatusLine.matchSSHConnect && typeof(config.hyperStatusLine.matchSSHConnect) == 'function'){
+        matchSSHConnect = config.hyperStatusLine.matchSSHConnect
     }
-    aliasSendCommand=config.statusline.aliasSendCommand || "fs"
-    aliasReceiveCommand=config.statusline.aliasReceiveCommand || "js"
-    sendCommand=config.statusline.sendCommand || "scp_send"
-    receiveCommand=config.statusline.receiveCommand || "scp_receive"
-    sshConnectTime=config.statusline.sshConnectTime || 1000
+    if(config.hyperStatusLine.matchSSHDisconnect && typeof(config.hyperStatusLine.matchSSHDisconnect) == 'function'){
+        matchSSHDisconnect = config.hyperStatusLine.matchSSHDisconnect
+    }
+    aliasSendCommand=config.hyperStatusLine.aliasSendCommand || "fs"
+    aliasReceiveCommand=config.hyperStatusLine.aliasReceiveCommand || "js"
+    sendCommand=config.hyperStatusLine.sendCommand || "scp_send"
+    receiveCommand=config.hyperStatusLine.receiveCommand || "scp_receive"
+    sshConnectTime=config.hyperStatusLine.sshConnectTime || 1000
+    injectCommand=config.hyperStatusLine.injectCommand || true
+    injectFuncName=config.hyperStatusLine.injectFuncName || "scp_inject_func"
+    defaultInteraction=config.hyperStatusLine.defaultInteraction || false
 
-    console.log(matchSSH)
+    console.log(matchSSHConnect)
 }
 
 const setCwd = (pid, action) => {
@@ -402,7 +464,7 @@ exports.middleware = (store) => (next) => (action) => {
             break;
         case 'SESSION_PTY_DATA':
             if(!SSHConnect[action.uid]){
-                let result = matchSSH(action.data, console.log)
+                let result = matchSSHConnect(action.data, console.log)
                 if(result){
                     setTimeout(() => {
                         exec(`ssh -p ${result[2]} ${result[0]}@${result[1]} "echo \\$HOSTNAME"`, (err, stdout) => {
@@ -412,6 +474,7 @@ exports.middleware = (store) => (next) => (action) => {
                                 // ssh can not reuse
                                 notify("SSH can not reuse")
                             } else {
+                                notify(`SSH server ${result[1]} connect success`)
                                 SSHConnect[action.uid] = {
                                     "host": result[1],
                                     "port": result[2],
@@ -426,7 +489,14 @@ exports.middleware = (store) => (next) => (action) => {
                     }, sshConnectTime);
                 }
             } else {
-                // match sendComman receiveCommand
+                // match disconnect
+                let result = matchSSHDisconnect(action.data, console.log)
+                if(result){
+                    notify(`SSH server ${SSHConnect[action.uid].host} disconnect`)
+                    delete SSHConnect[action.uid]
+                    return
+                }
+                // match sendCommand receiveCommand
                 let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
                 let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
                 sendResult = sendRegex.exec(action.data)
@@ -451,8 +521,8 @@ exports.middleware = (store) => (next) => (action) => {
 };
 
 const injectCommandToServer = (termID) => {
-    let helpCMD = `printf '\\nUsage:\\n${aliasSendCommand} [localhost:]file1 ... [-d [remoteserver:]path]\\n${aliasReceiveCommand} [remoteserver:]file1 ... [-d [localhost:]path]\\n\\nOptions:\\n-d  The destination in localhost or remoteserver.It can be absolute path or relative to your pwd.\\n\\nExample:\\n${aliasSendCommand} testfile.txt   This will send the file in your localhost pwd to the remoteserver.\\n\\nInject success! Enjoy yourself!\\n\\n'`
-    executeCommand(`${injectFuncName}(){ local s="";for i in $@; do s="$s '$i'"; done;s="$s '-w' '$(pwd)'";echo $s; } && alias ${aliasSendCommand}="${injectFuncName} ${sendCommand}" && alias ${aliasReceiveCommand}="${injectFuncName} ${receiveCommand}" && ${helpCMD}`, termID)
+    let helpCMD = `printf '\\nUsage:\\n${aliasSendCommand} [localhost:]file1 ... [-d [remoteserver:]path]\\n${aliasReceiveCommand} [remoteserver:]file1 ... [-d [localhost:]path]\\n\\nOptions:\\n-d  The destination in localhost or remoteserver.It can be absolute path or relative to your pwd.\\n-i  Open the file dialog to choose the source files when send to server or the destination folder when receive from server.\\n-n   Do not Open the file dialog.\\n\\nExample:\\n${aliasSendCommand} testfile.txt   This will send the file in your localhost pwd to the remoteserver.\\n\\nInject success! Enjoy yourself!\\n\\n'`
+    executeCommand(`${injectFuncName}(){ local s="";for i in $@; do s="$s '$i'"; done;s="$s '-w' '$(pwd)'";echo $s; } && alias ${aliasSendCommand}="${injectFuncName} ${sendCommand} ${defaultInteraction ? '-i' : '-n'}" && alias ${aliasReceiveCommand}="${injectFuncName} ${receiveCommand} ${defaultInteraction ? '-i' : '-n'}" && ${helpCMD}`, termID)
 }
 
 const parseArgs = (arg) =>{
@@ -476,43 +546,52 @@ const handleSend = (termID, arg) => {
     let source = []
     let destination = ''
     let serverPWD = ''
+    let isInteractive = false
     args.forEach((value, index, arr) => {
         if(index && arr[index-1] == "'-d'"){
             destination = value
         }else if(index && arr[index-1] == "'-w'"){
             serverPWD = value
-        }else if(value != "'-d'" && value != "'-w'"){
+        }else if(arr[index] == "'-i'"){
+            isInteractive = true
+        }else if(arr[index] == "'-n'"){
+            isInteractive = false
+        }else if (value != "'-d'" && value != "'-w'" && value != "'-i'" && value != "'-n'") {
             source.push(value)
         }
     });
     console.log(source, destination, serverPWD)
-    source.forEach((value, index, arr) => {
-        if (value[0] != "/"){
-            arr[index] = path.join(cwd, value)
-        }
-    })
-    if(destination==""){
+    if (destination == "") {
         destination = serverPWD
-    } else if (destination[0] != "/"){
+    } else if (destination[0] != "/") {
         destination = path.join(serverPWD, destination)
     }
-    console.log("source  ", source)
-    console.log("destination  ", destination)
-    let server = SSHConnect[termID]
-    execSSH(server, `mkdir -p ${destination}`, (err, stdout, stderr)=>{
-        if(err){
-            notify("Create destination false", stdout)
-            return;
-        }
-        execCMD(`scp -r -P ${server.port} ${source.join(' ')} ${server.user}@${server.host}:${destination}`, (err, stdout) => {
-            if(err){
-                notify("Send file false", stdout)
-                return;
-            }else{
-                notify("Send success")
+    console.log("isInteractive", isInteractive)
+    if(isInteractive){
+        window.rpc.emit("scp-send-select-file", {
+            options: {
+                defaultPath: cwd,
+                title: "请选择上传的文件",
+                buttonLabel: "确定",
+                filters: [],
+                properties: ['openFile', 'openDirectory', 'multiSelections', 'showHiddenFiles'],
+                message: "",
+            },
+            args: {
+                server: SSHConnect[termID],
+                destination: destination
             }
-        });
-    })
+        })
+    } else {
+        source.forEach((value, index, arr) => {
+            if (value[0] != "/"){
+                arr[index] = path.join(cwd, value)
+            }
+        })
+        console.log("source  ", source)
+        console.log("destination  ", destination)
+        scpToServer(SSHConnect[termID], source, destination)
+    }
 }
 
 const handleReceive = (termID, arg) => {
@@ -521,12 +600,17 @@ const handleReceive = (termID, arg) => {
     let source = []
     let destination = ''
     let serverPWD = ''
+    let isInteractive = false
     args.forEach((value, index, arr) => {
         if(index && arr[index-1] == "'-d'"){
             destination = value
         }else if(index && arr[index-1] == "'-w'"){
             serverPWD = value
-        }else if(value != "'-d'" && value != "'-w'"){
+        }else if(arr[index] == "'-i'"){
+            isInteractive = true
+        }else if(arr[index] == "'-n'"){
+            isInteractive = false
+        }else if(value != "'-d'" && value != "'-w'" && value != "'-i'" && value != "'-n'"){
             source.push(value)
         }
     });
@@ -536,34 +620,72 @@ const handleReceive = (termID, arg) => {
             arr[index] = path.join(serverPWD, value)
         }
     })
-    if(destination==""){
-        destination = cwd
-    } else if (destination[0] != "/"){
-        destination = path.join(cwd, destination)
-    }
-    console.log("source  ", source)
-    console.log("destination  ", destination)
-    let server = SSHConnect[termID]
-    execCMD(`mkdir -p ${destination}`, (err, stdout, stderr)=>{
-        if(err){
-            notify("Create destination false", stdout)
-            return;
-        }
-        execCMD(`scp -r -P ${server.port} ${server.user}@${server.host}:"${source.join(' ')}" ${destination}`, (err, stdout) => {
-            if(err){
-                notify("Receive file false", stdout)
-                return;
-            }else{
-                notify("Receive success")
+    console.log("isInteractive", isInteractive)
+    if(isInteractive){
+        window.rpc.emit("scp-receive-select-path", {
+            options: {
+                defaultPath: cwd,
+                title: "请选择保存路径",
+                buttonLabel: "确定",
+                filters: [],
+                properties: ['openDirectory', 'showHiddenFiles', 'createDirectory'],
+                message: "",
+            },
+            args: {
+                server: SSHConnect[termID],
+                source: source
             }
-        });
-    })
+        })
+    } else {
+        if(destination==""){
+            destination = cwd
+        } else if (destination[0] != "/"){
+            destination = path.join(cwd, destination)
+        }
+        console.log("source  ", source)
+        console.log("destination  ", destination)
+        scpToLocal(SSHConnect[termID], source, destination)
+    }
 }
 
 if (!Array.isArray) {
     Array.isArray = function(arg) {
         return Object.prototype.toString.call(arg) === '[object Array]';
     };
+}
+
+const scpToServer = (server, source, destination, handle) => {
+    execSSH(server, `mkdir -p ${destination}`, (err, stdout, stderr) => {
+        if (err) {
+            notify("Create destination false", stdout)
+            return;
+        }
+        execCMD(`scp -r -P ${server.port} ${source.join(' ')} ${server.user}@${server.host}:${destination}`, (err, stdout, stderr) => {
+            if (err) {
+                notify("Send file false", stdout)
+            } else {
+                notify("Send success")
+            }
+            handle && handle(err, stdout, stderr)
+        });
+    })
+}
+
+const scpToLocal = (server, source, destination, handle) => {
+    execCMD(`mkdir -p ${destination}`, (err, stdout, stderr) => {
+        if (err) {
+            notify("Create destination false", stdout)
+            return;
+        }
+        execCMD(`scp -r -P ${server.port} ${server.user}@${server.host}:"${source.join(' ')}" ${destination}`, (err, stdout, stderr) => {
+            if (err) {
+                notify("Receive file false", stdout)
+            } else {
+                notify("Receive success")
+            }
+            handle && handle(err, stdout, stderr)
+        });
+    })
 }
 
 const execSSH = (server, cmd, handle) => {
