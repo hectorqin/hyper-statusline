@@ -198,7 +198,17 @@ exports.onWindow = (win) => {
         console.log(options)
         console.log(args)
         const dialog = require('electron').dialog
-        // const notify = require('hyper/notify');
+        const notify = (title, body, details) => {win.rpc.emit("statusline-notify", {title, body, details})}
+        // const notify = (title, body, details={}) => {
+        //     console.log(`[Notification] ${title}: ${body}`);
+        //     if (details.error) {
+        //         console.error(details.error);
+        //     }
+        //     win.webContents.send('notification', {
+        //         title,
+        //         body
+        //     });
+        // }
         dialog.showOpenDialog(options, function (files) {
             console.log(files)
             if(!files || !files.length){
@@ -216,7 +226,17 @@ exports.onWindow = (win) => {
         console.log(options)
         console.log(args)
         const dialog = require('electron').dialog
-        // const notify = require('hyper/notify');
+        const notify = (title, body, details) => {win.rpc.emit("statusline-notify", {title, body, details})}
+        // const notify = (title, body, details={}) => {
+        //     console.log(`[Notification] ${title}: ${body}`);
+        //     if (details.error) {
+        //         console.error(details.error);
+        //     }
+        //     win.webContents.send('notification', {
+        //         title,
+        //         body
+        //     });
+        // }
         dialog.showOpenDialog(options, function (files) {
             console.log(files)
             if(!files || !files.length){
@@ -428,6 +448,9 @@ exports.decorateHyper = (Hyper, { React }) => {
                     ahead: git.ahead
                 });
             }, 100);
+            window.rpc.on('statusline-notify', ({title, body, details}) => {
+                notify(title, body, details)
+            })
         }
 
         componentWillUnmount() {
@@ -568,6 +591,7 @@ const handleSend = (termID, arg) => {
     }
     console.log("isInteractive", isInteractive)
     if(isInteractive){
+        notify("Choose files to send")
         window.rpc.emit("scp-send-select-file", {
             options: {
                 defaultPath: cwd,
@@ -622,6 +646,7 @@ const handleReceive = (termID, arg) => {
     })
     console.log("isInteractive", isInteractive)
     if(isInteractive){
+        notify("Choose path to receive")
         window.rpc.emit("scp-receive-select-path", {
             options: {
                 defaultPath: cwd,
