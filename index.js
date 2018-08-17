@@ -243,7 +243,7 @@ exports.onWindow = (win) => {
                 notify("User canceled")
                 return
             }
-            scpToLocal(args.server, args.source, files[0])
+            scpToLocal(args.server, args.source, "'" + files[0] + "'")
         })
     })
     _win = win
@@ -513,7 +513,8 @@ exports.middleware = (store) => (next) => (action) => {
                 }
             } else {
                 // match disconnect
-                let result = matchSSHDisconnect(action.data, console.log)
+                let data = action.data.trim("\n")
+                let result = matchSSHDisconnect(data, console.log)
                 if(result){
                     notify(`SSH server ${SSHConnect[action.uid].host} disconnect`)
                     delete SSHConnect[action.uid]
@@ -522,16 +523,20 @@ exports.middleware = (store) => (next) => (action) => {
                 // match sendCommand receiveCommand
                 let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
                 let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
-                sendResult = sendRegex.exec(action.data)
-                console.log("sendResult", sendResult)
-                if(sendResult){
-                    handleSend(action.uid, sendResult[1])
-                }
-                receiveResult = receiveRegex.exec(action.data)
-                console.log("receiveResult", receiveResult)
-                if(receiveResult){
-                    handleReceive(action.uid, receiveResult[1])
-                }
+                data.split("\n").every((line)=>{
+                    sendResult = sendRegex.exec(line)
+                    console.log("sendResult", sendResult)
+                    if(sendResult){
+                        handleSend(action.uid, sendResult[1])
+                        return false
+                    }
+                    receiveResult = receiveRegex.exec(line)
+                    console.log("receiveResult", receiveResult)
+                    if(receiveResult){
+                        handleReceive(action.uid, receiveResult[1])
+                        return false
+                    }
+                })
             }
             break;
         case 'CONFIG_LOAD':
@@ -586,8 +591,8 @@ const handleSend = (termID, arg) => {
     console.log(source, destination, serverPWD)
     if (destination == "") {
         destination = serverPWD
-    } else if (destination[0] != "/") {
-        destination = path.join(serverPWD, destination)
+    } else if (destination.trim("'")[0] != "/") {
+        destination = "'" + path.join(serverPWD.trim("'"), destination.trim("'")) + "'"
     }
     console.log("isInteractive", isInteractive)
     if(isInteractive){
@@ -608,8 +613,9 @@ const handleSend = (termID, arg) => {
         })
     } else {
         source.forEach((value, index, arr) => {
+            value = value.trim("'")
             if (value[0] != "/"){
-                arr[index] = path.join(cwd, value)
+                arr[index] = "'" + path.join(cwd, value) + "'"
             }
         })
         console.log("source  ", source)
@@ -640,8 +646,9 @@ const handleReceive = (termID, arg) => {
     });
     console.log(source, destination, serverPWD)
     source.forEach((value, index, arr) => {
+        value = value.trim("'")
         if (value[0] != "/"){
-            arr[index] = path.join(serverPWD, value)
+            arr[index] = "'" + path.join(serverPWD.trim("'"), value) + "'"
         }
     })
     console.log("isInteractive", isInteractive)
@@ -663,9 +670,9 @@ const handleReceive = (termID, arg) => {
         })
     } else {
         if(destination==""){
-            destination = cwd
-        } else if (destination[0] != "/"){
-            destination = path.join(cwd, destination)
+            destination = "'" + cwd + "'"
+        } else if (destination.trim("'")[0] != "/"){
+            destination = "'" + path.join(cwd, destination.trim("'")) + "'"
         }
         console.log("source  ", source)
         console.log("destination  ", destination)
@@ -712,6 +719,18 @@ const scpToLocal = (server, source, destination, handle) => {
         });
     })
 }
+
+String.prototype.trim = function (char, type) {
+    if (char) {
+        if (type == 'left') {
+            return this.replace(new RegExp('^\\'+char+'+', 'g'), '');
+        } else if (type == 'right') {
+            return this.replace(new RegExp('\\'+char+'+$', 'g'), '');
+        }
+        return this.replace(new RegExp('^\\'+char+'+|\\'+char+'+$', 'g'), '');
+    }
+    return this.replace(/^\s+|\s+$/g, '');
+};
 
 const execSSH = (server, cmd, handle) => {
     cmd = Array.isArray(cmd) ? cmd : [cmd]
