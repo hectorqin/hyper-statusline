@@ -14,7 +14,7 @@ try {
         if (details.error) {
             console.error(details.error);
         }
-        console.log(_win)
+        // console.log(_win)
         if (_win) {
             _win.webContents.send('notification', {
                 title,
@@ -247,7 +247,7 @@ exports.onWindow = (win) => {
         })
     })
     _win = win
-    console.log(_win)
+    // console.log(_win)
 };
 
 exports.onApp = (app) => {
@@ -523,7 +523,10 @@ exports.middleware = (store) => (next) => (action) => {
                 // match sendCommand receiveCommand
                 let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
                 let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
+                console.log("match lines", data.split("\n"))
                 data.split("\n").every((line)=>{
+                    line = line.trim()
+                    console.log("match line", line)
                     sendResult = sendRegex.exec(line)
                     console.log("sendResult", sendResult)
                     if(sendResult){
@@ -536,6 +539,7 @@ exports.middleware = (store) => (next) => (action) => {
                         handleReceive(action.uid, receiveResult[1])
                         return false
                     }
+                    return true
                 })
             }
             break;
