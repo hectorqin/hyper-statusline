@@ -10,11 +10,11 @@ try {
     notify = require('hyper/notify');
 } catch (error) {
     notify = function(title, body, details = {}) {
-        console.log(`[Notification] ${title}: ${body}`);
+        debugLogger(`[Notification] ${title}: ${body}`);
         if (details.error) {
             console.error(details.error);
         }
-        // console.log(_win)
+        // debugLogger(_win)
         if (_win) {
             _win.webContents.send('notification', {
                 title,
@@ -182,6 +182,9 @@ let sshConnectTime=1000
 let injectCommand = true
 let injectFuncName = "scp_inject_func"
 let defaultInteraction = false
+let debugLog = true
+let maxMatchLength = 500
+let scpHelperDisable = true
 
 // @flow
 
@@ -189,6 +192,9 @@ const WRITE_TO_TERMINAL = 'statusline/executecommand';
 const writeToTerminal = (command, uid) => window.rpc.emit(WRITE_TO_TERMINAL, { command, uid });
 const executeCommand = (command, uid, currentInput = '') =>
   writeToTerminal(`${'\b'.repeat(currentInput.length)}${command}\r`, uid);
+const debugLogger = function(){
+    debugLog && console.log.apply(null, arguments)
+}
 
 exports.onWindow = (win) => {
     win.rpc.on(WRITE_TO_TERMINAL, ({ uid, command }) => {
@@ -260,7 +266,7 @@ const refreshConfig = (config) =>{
         config = _app.config.getConfig()
     }
     if(!config || !config.hyperStatusLine) return
-    console.log(config.hyperStatusLine)
+    debugLogger(config.hyperStatusLine)
     if(config.hyperStatusLine.matchSSHConnect && typeof(config.hyperStatusLine.matchSSHConnect) == 'function'){
         matchSSHConnect = config.hyperStatusLine.matchSSHConnect
     }
@@ -275,8 +281,9 @@ const refreshConfig = (config) =>{
     injectCommand=config.hyperStatusLine.injectCommand || true
     injectFuncName=config.hyperStatusLine.injectFuncName || "scp_inject_func"
     defaultInteraction=config.hyperStatusLine.defaultInteraction || false
-
-    console.log(matchSSHConnect)
+    debugLog=config.hyperStatusLine.debugLog || false
+    maxMatchLength=config.hyperStatusLine.maxMatchLength || 500
+    debugLogger(matchSSHConnect)
 }
 
 const setCwd = (pid, action) => {
@@ -295,7 +302,7 @@ const setCwd = (pid, action) => {
             setGit(cwd);
         });
     }
-    
+
 };
 
 const isGit = (dir, cb) => {
@@ -461,7 +468,7 @@ exports.decorateHyper = (Hyper, { React }) => {
 
 exports.middleware = (store) => (next) => (action) => {
     const uids = store.getState().sessions.sessions;
-    console.log(action)
+    debugLogger(action)
     switch (action.type) {
         case 'SESSION_SET_XTERM_TITLE':
             pid = uids[action.uid].pid;
@@ -481,67 +488,12 @@ exports.middleware = (store) => (next) => (action) => {
                 setCwd(pid, action);
             }
             break;
-            case 'SESSION_SET_ACTIVE':
+        case 'SESSION_SET_ACTIVE':
             pid = uids[action.uid].pid;
             setCwd(pid);
             break;
         case 'SESSION_PTY_DATA':
-            if(!SSHConnect[action.uid]){
-                let result = matchSSHConnect(action.data, console.log)
-                if(result){
-                    setTimeout(() => {
-                        exec(`ssh -p ${result[2]} ${result[0]}@${result[1]} "echo \\$HOSTNAME"`, (err, stdout) => {
-                            console.log("error", err);
-                            console.log("stdout", stdout);
-                            if(err){
-                                // ssh can not reuse
-                                notify("SSH can not reuse")
-                            } else {
-                                notify(`SSH server ${result[1]} connect success`)
-                                SSHConnect[action.uid] = {
-                                    "host": result[1],
-                                    "port": result[2],
-                                    "user": result[0]
-                                }
-                                if(injectCommand){
-                                    injectCommandToServer(action.uid)
-                                }
-
-                            }
-                        });
-                    }, sshConnectTime);
-                }
-            } else {
-                // match disconnect
-                let data = action.data.trim("\n")
-                let result = matchSSHDisconnect(data, console.log)
-                if(result){
-                    notify(`SSH server ${SSHConnect[action.uid].host} disconnect`)
-                    delete SSHConnect[action.uid]
-                    return
-                }
-                // match sendCommand receiveCommand
-                let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
-                let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
-                console.log("match lines", data.split("\n"))
-                data.split("\n").every((line)=>{
-                    line = line.trim()
-                    console.log("match line", line)
-                    sendResult = sendRegex.exec(line)
-                    console.log("sendResult", sendResult)
-                    if(sendResult){
-                        handleSend(action.uid, sendResult[1])
-                        return false
-                    }
-                    receiveResult = receiveRegex.exec(line)
-                    console.log("receiveResult", receiveResult)
-                    if(receiveResult){
-                        handleReceive(action.uid, receiveResult[1])
-                        return false
-                    }
-                    return true
-                })
-            }
+            matchPTYData(action)
             break;
         case 'CONFIG_LOAD':
         case 'CONFIG_RELOAD':
@@ -551,6 +503,71 @@ exports.middleware = (store) => (next) => (action) => {
 
     next(action);
 };
+
+const matchPTYData = (action) => {
+    if (scpHelperDisable) return
+    // 字符太长，就不匹配了，影响性能
+    if (action.data.length > maxMatchLength) return
+    if(!SSHConnect[action.uid]){
+        let result = matchSSHConnect(action.data, debugLogger)
+        if(result){
+            setTimeout(() => {
+                exec(`ssh -p ${result[2]} ${result[0]}@${result[1]} "echo \\$HOSTNAME"`, (err, stdout) => {
+                    debugLogger("error", err);
+                    debugLogger("stdout", stdout);
+                    if(err){
+                        // ssh can not reuse
+                        notify("SSH can not reuse")
+                    } else {
+                        notify(`SSH server ${result[1]} connect success`)
+                        SSHConnect[action.uid] = {
+                            "host": result[1],
+                            "port": result[2],
+                            "user": result[0]
+                        }
+                        if(injectCommand){
+                            injectCommandToServer(action.uid)
+                        }
+
+                    }
+                });
+            }, sshConnectTime);
+        }
+    } else {
+        // match disconnect
+        let data = action.data.trim("\n")
+        let result = matchSSHDisconnect(data, debugLogger)
+        debugLogger("matchSSHDisconnect", result)
+        if(result){
+            notify(`SSH server ${SSHConnect[action.uid].host} disconnect`)
+            delete SSHConnect[action.uid]
+            return
+        }
+        // match sendCommand receiveCommand
+        let sendRegex = new RegExp("^'" + sendCommand + "' (.+)")
+        let receiveRegex = new RegExp("^'" + receiveCommand + "' (.+)")
+        // 只取前3条进行匹配
+        let lines = data.split("\n", 3)
+        debugLogger("match lines", lines)
+        lines.every((line)=>{
+            line = line.trim()
+            debugLogger("match line", line)
+            sendResult = sendRegex.exec(line)
+            debugLogger("sendResult", sendResult)
+            if(sendResult){
+                handleSend(action.uid, sendResult[1])
+                return false
+            }
+            receiveResult = receiveRegex.exec(line)
+            debugLogger("receiveResult", receiveResult)
+            if(receiveResult){
+                handleReceive(action.uid, receiveResult[1])
+                return false
+            }
+            return true
+        })
+    }
+}
 
 const injectCommandToServer = (termID) => {
     let helpCMD = `printf '\\nUsage:\\n${aliasSendCommand} [localhost:]file1 ... [-d [remoteserver:]path]\\n${aliasReceiveCommand} [remoteserver:]file1 ... [-d [localhost:]path]\\n\\nOptions:\\n-d  The destination in localhost or remoteserver.It can be absolute path or relative to your pwd.\\n-i  Open the file dialog to choose the source files when send to server or the destination folder when receive from server.\\n-n   Do not Open the file dialog.\\n\\nExample:\\n${aliasSendCommand} testfile.txt   This will send the file in your localhost pwd to the remoteserver.\\n\\nInject success! Enjoy yourself!\\n\\n'`
@@ -574,7 +591,7 @@ const parseArgs = (arg) =>{
 
 const handleSend = (termID, arg) => {
     let args = parseArgs(arg)
-    console.log(args)
+    debugLogger(args)
     let source = []
     let destination = ''
     let serverPWD = ''
@@ -592,13 +609,13 @@ const handleSend = (termID, arg) => {
             source.push(value)
         }
     });
-    console.log(source, destination, serverPWD)
+    debugLogger(source, destination, serverPWD)
     if (destination == "") {
         destination = serverPWD
     } else if (destination.trim("'")[0] != "/") {
         destination = "'" + path.join(serverPWD.trim("'"), destination.trim("'")) + "'"
     }
-    console.log("isInteractive", isInteractive)
+    debugLogger("isInteractive", isInteractive)
     if(isInteractive){
         notify("Choose files to send")
         window.rpc.emit("scp-send-select-file", {
@@ -622,15 +639,15 @@ const handleSend = (termID, arg) => {
                 arr[index] = "'" + path.join(cwd, value) + "'"
             }
         })
-        console.log("source  ", source)
-        console.log("destination  ", destination)
+        debugLogger("source  ", source)
+        debugLogger("destination  ", destination)
         scpToServer(SSHConnect[termID], source, destination)
     }
 }
 
 const handleReceive = (termID, arg) => {
     let args = parseArgs(arg)
-    console.log(args)
+    debugLogger(args)
     let source = []
     let destination = ''
     let serverPWD = ''
@@ -648,14 +665,14 @@ const handleReceive = (termID, arg) => {
             source.push(value)
         }
     });
-    console.log(source, destination, serverPWD)
+    debugLogger(source, destination, serverPWD)
     source.forEach((value, index, arr) => {
         value = value.trim("'")
         if (value[0] != "/"){
             arr[index] = "'" + path.join(serverPWD.trim("'"), value) + "'"
         }
     })
-    console.log("isInteractive", isInteractive)
+    debugLogger("isInteractive", isInteractive)
     if(isInteractive){
         notify("Choose path to receive")
         window.rpc.emit("scp-receive-select-path", {
@@ -678,8 +695,8 @@ const handleReceive = (termID, arg) => {
         } else if (destination.trim("'")[0] != "/"){
             destination = "'" + path.join(cwd, destination.trim("'")) + "'"
         }
-        console.log("source  ", source)
-        console.log("destination  ", destination)
+        debugLogger("source  ", source)
+        debugLogger("destination  ", destination)
         scpToLocal(SSHConnect[termID], source, destination)
     }
 }
@@ -745,11 +762,11 @@ const execSSH = (server, cmd, handle) => {
 }
 
 const execCMD = (command, handle) => {
-    console.log(command)
+    debugLogger(command)
     exec(command, (err, stdout, stderr) => {
-        console.log("error", err);
-        console.log("stdout", stdout);
-        console.log("stderr", stderr);
+        debugLogger("error", err);
+        debugLogger("stdout", stdout);
+        debugLogger("stderr", stderr);
         handle && handle(err, stdout, stderr)
     });
 }
